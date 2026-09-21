@@ -209,7 +209,7 @@ llm = None
 if st.session_state["API"]:
     llm = ChatGroq(
         groq_api_key=st.session_state["API"],
-        model_name="qwen-2.5-32b",
+        model_name="qwen/qwen3.8-27b",
         temperature=0.3,
     )
 
