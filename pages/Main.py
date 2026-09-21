@@ -10,7 +10,7 @@ import uuid
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-from jupyter_client import KernelManager
+from jupyter_client import KernelManager, KernelSpecManager
 
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
@@ -30,8 +30,10 @@ class StreamlitJupyterKernel:
 
     def __init__(self):
         # 1. Ensure 'python3' kernel spec exists in environment
-        ksm = KernelManager()
-        if "python3" not in ksm.find_kernel_specs():
+        ksm = KernelSpecManager()
+
+        # Use get_all_specs() instead of find_kernel_specs()
+        if "python3" not in ksm.get_all_specs():
             import subprocess
             import sys
 
