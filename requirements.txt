@@ -8,5 +8,6 @@ plotly
 scikit-learn
 statsmodels
 scipy
+matplotlib
 jupyter_client
 ipykernel
