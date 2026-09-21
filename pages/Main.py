@@ -28,6 +28,26 @@ class StreamlitJupyterKernel:
     """Manages an active ipykernel session per Streamlit session state."""
 
     def __init__(self):
+        # 1. Ensure 'python3' kernel spec exists in environment
+        ksm = KernelSpecManager()
+        if "python3" not in ksm.find_kernel_specs():
+            import subprocess
+            import sys
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "ipykernel",
+                    "install",
+                    "--user",
+                    "--name",
+                    "python3",
+                ],
+                check=True,
+            )
+
+        # 2. Start kernel
         self.km = KernelManager(kernel_name="python3")
         self.km.start_kernel()
         self.kc = self.km.client()
