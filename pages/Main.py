@@ -10,7 +10,8 @@ import uuid
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-from jupyter_client.kernelspec import KernelSpecManager
+from jupyter_client import KernelManager
+
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
 from langchain_groq import ChatGroq
@@ -48,7 +49,7 @@ class StreamlitJupyterKernel:
             )
 
         # 2. Start kernel
-        self.km = KernelSpecManager(kernel_name="python3")
+        self.km = KernelManager(kernel_name="python3")
         self.km.start_kernel()
         self.kc = self.km.client()
         self.kc.start_channels()
