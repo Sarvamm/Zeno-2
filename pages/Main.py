@@ -30,7 +30,7 @@ class StreamlitJupyterKernel:
 
     def __init__(self):
         # 1. Ensure 'python3' kernel spec exists in environment
-        ksm = KernelSpecManager()
+        ksm = KernelManager()
         if "python3" not in ksm.find_kernel_specs():
             import subprocess
             import sys
