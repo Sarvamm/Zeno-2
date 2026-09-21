@@ -8,3 +8,4 @@ plotly
 scikit-learn
 statsmodels
 scipy
+jupyter_client
