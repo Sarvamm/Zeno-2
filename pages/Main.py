@@ -48,7 +48,7 @@ class StreamlitJupyterKernel:
             )
 
         # 2. Start kernel
-        self.km = KernelManager(kernel_name="python3")
+        self.km = KernelSpecManager(kernel_name="python3")
         self.km.start_kernel()
         self.kc = self.km.client()
         self.kc.start_channels()
