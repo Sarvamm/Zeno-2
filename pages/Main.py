@@ -10,7 +10,7 @@ import uuid
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-from jupyter_client import KernelManager
+from jupyter_client import KernelSpecManager
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
 from langchain_groq import ChatGroq
