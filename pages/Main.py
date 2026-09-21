@@ -5,6 +5,8 @@ import json
 import os
 import random as rd
 import re
+import subprocess
+import sys
 import tempfile
 import uuid
 import pandas as pd
@@ -27,17 +29,25 @@ pio.templates.default = "plotly_dark"
 #                            Jupyter Kernel Manager                            #
 # ---------------------------------------------------------------------------- #
 class StreamlitJupyterKernel:
-    """Manages an active ipykernel session per Streamlit session state."""
+    """Manages an active ipykernel session bound directly to the current runtime environment."""
 
     def __init__(self):
-        # 1. Ensure 'python3' kernel spec exists in environment
+        # 1. Ensure a kernel spec tied specifically to the current venv executable exists
+        kernel_name = self._ensure_env_kernelspec()
+
+        # 2. Start kernel instance
+        self.km = KernelManager(kernel_name=kernel_name)
+        self.km.start_kernel()
+        self.kc = self.km.client()
+        self.kc.start_channels()
+        self.kc.wait_for_ready(timeout=15)
+
+    def _ensure_env_kernelspec(self) -> str:
+        """Registers a dedicated Jupyter kernel spec matching current sys.executable."""
         ksm = KernelSpecManager()
+        kernel_name = f"streamlit_env_{sys.version_info.major}_{sys.version_info.minor}"
 
-        # Use get_all_specs() instead of find_kernel_specs()
-        if "python3" not in ksm.get_all_specs():
-            import subprocess
-            import sys
-
+        if kernel_name not in ksm.get_all_specs():
             subprocess.run(
                 [
                     sys.executable,
@@ -46,26 +56,22 @@ class StreamlitJupyterKernel:
                     "install",
                     "--user",
                     "--name",
-                    "python3",
+                    kernel_name,
+                    "--display-name",
+                    "Streamlit Environment Python",
                 ],
                 check=True,
             )
+        return kernel_name
 
-        # 2. Start kernel
-        self.km = KernelManager(kernel_name="python3")
-        self.km.start_kernel()
-        self.kc = self.km.client()
-        self.kc.start_channels()
-        self.kc.wait_for_ready(timeout=10)
-
-    def execute_code(self, code: str) -> list[dict]:
-        """Executes code inside active kernel and collects raw iopub messages."""
+    def execute_code(self, code: str, timeout: int = 20) -> list[dict]:
+        """Executes Python code inside the kernel and returns captured outputs."""
         msg_id = self.kc.execute(code)
         outputs = []
 
         while True:
             try:
-                msg = self.kc.get_iopub_msg(timeout=10)
+                msg = self.kc.get_iopub_msg(timeout=timeout)
             except Exception:
                 break
 
@@ -86,8 +92,10 @@ class StreamlitJupyterKernel:
 
         return outputs
 
-    def inject_dataframe(self, df: pd.DataFrame, var_name: str = "df"):
-        """Loads uploaded CSV DataFrame into kernel global memory."""
+    def inject_dataframe(
+        self, df: pd.DataFrame, var_name: str = "df"
+    ) -> tuple[bool, str | None]:
+        """Injects a pandas DataFrame into global kernel memory and checks for errors."""
         temp_dir = tempfile.gettempdir()
         temp_csv_path = os.path.join(temp_dir, f"data_{uuid.uuid4().hex[:8]}.csv")
         clean_path = temp_csv_path.replace("\\", "/")
@@ -106,16 +114,25 @@ pio.templates.default = "plotly_dark"
 pio.renderers.default = 'notebook_connected'
 {var_name} = pd.read_csv('{clean_path}')
 """
-        self.execute_code(init_code)
+        outputs = self.execute_code(init_code, timeout=30)
+
+        for out in outputs:
+            if out.get("type") == "error":
+                clean_tb = "\n".join(
+                    [re.sub(r"\x1b\[[0-9;]*m", "", line) for line in out["traceback"]]
+                )
+                return False, clean_tb
+
+        return True, None
 
     def get_kernel_memory_manifest(self) -> dict:
-        """Inspects kernel global namespace to retrieve active variables, DataFrames, and shapes."""
+        """Inspects active global scope variables inside the running kernel."""
         inspection_code = """
 import json
 import pandas as pd
 
 _vars_summary = {}
-_ignore_keys = {'In', 'Out', 'exit', 'quit', 'get_ipython', 'pd', 'px', 'go', 'pio', 'json'}
+_ignore_keys = {'In', 'Out', 'exit', 'quit', 'get_ipython', 'pd', 'px', 'go', 'pio', 'json', 'np', 'plt'}
 
 for _k, _v in list(globals().items()):
     if not _k.startswith('_') and _k not in _ignore_keys:
@@ -156,7 +173,7 @@ print("MANIFEST_START" + json.dumps(_vars_summary) + "MANIFEST_END")
         return {}
 
     def stop(self):
-        """Safely shuts down client channels and kernel process."""
+        """Cleanly halts channels and terminates the Jupyter subprocess."""
         try:
             if hasattr(self, "kc") and self.kc is not None:
                 self.kc.stop_channels()
@@ -199,7 +216,9 @@ if "user_input" not in st.session_state:
 #                               Schema Definition                              #
 # ---------------------------------------------------------------------------- #
 class ListFormatter(BaseModel):
-    questions: list[str] = Field(description="List of 10 data analysis questions")
+    questions: list[str] = Field(
+        description="List of 10 actionable data analysis questions"
+    )
 
 
 # ---------------------------------------------------------------------------- #
@@ -215,10 +234,10 @@ if st.session_state["API"]:
 
 
 # ---------------------------------------------------------------------------- #
-#                                   Functions                                  #
+#                               Helper Functions                               #
 # ---------------------------------------------------------------------------- #
 def extract_command(input_text: str) -> str:
-    """Strips the leading slash and cleans up markdown formatting."""
+    """Strips leading slashes and extracts raw python blocks."""
     cmd = input_text.lstrip("/").strip()
     match = re.search(r"```(?:python)?\s*\n?(.*?)```", cmd, re.DOTALL)
     if match:
@@ -227,7 +246,7 @@ def extract_command(input_text: str) -> str:
 
 
 def format_history_for_prompt() -> str:
-    """Combines interaction logs so LLM retains conversation context."""
+    """Formats prior chat messages for the LLM prompt context."""
     if not st.session_state.messages:
         return "No prior conversation."
 
@@ -244,7 +263,7 @@ def get_answer(user_prompt: str):
     if st.session_state["kernel"]:
         kernel_manifest = st.session_state["kernel"].get_kernel_memory_manifest()
 
-    task_prompt_template = """You are an expert Python Data Analyst operating inside a persistent Jupyter Kernel session.
+    task_prompt_template = """You are an expert Data Analyst operating inside a persistent Jupyter Kernel session.
 
 Active Jupyter Kernel Memory State:
 {kernel_manifest}
@@ -254,22 +273,14 @@ Execution History:
 
 Requirements & Guidelines:
 1. State & Variable Continuity:
-   - You MUST utilize active variables, created DataFrames, and modified schemas listed in the Kernel Memory State above.
-   - Reuse existing variables directly instead of re-loading or re-calculating them.
-   The following imports are already loaded in kernel memory—DO NOT RE-IMPORT THEM:
-     import pandas as pd
-     import numpy as np
-     import matplotlib.pyplot as plt
-     import plotly.express as px
-     import plotly.graph_objects as go
-     import plotly.io as pio
+   - Reuse active variables and DataFrames directly instead of re-loading or re-calculating.
+   - Pre-loaded imports (DO NOT RE-IMPORT): pandas as pd, numpy as np, matplotlib.pyplot as plt, plotly.express as px, plotly.graph_objects as go, plotly.io as pio.
 
 2. Code Standards:
-   - For Plots: Use Plotly Express (`px`) or Plotly Graph Objects (`go`). Dark mode is pre-configured.
-   - Always end visualization scripts with `fig.show()`.
+   - For Visualizations: Use Plotly Express (`px`) or Plotly Graph Objects (`go`). Always call `fig.show()`.
 
 3. Output Format:
-   - Return ONLY valid executable Python code wrapped inside standard ```python ... ``` blocks.
+   - Return ONLY executable Python code inside standard ```python ... ``` markdown blocks.
 
 User Question:
 {user_prompt}"""
@@ -287,9 +298,7 @@ User Question:
 
 
 def get_active_dataframe_info() -> tuple[list[int] | None, pd.DataFrame | None]:
-    """Retrieves current column details, missing counts, unique value counts,
-    mean, median, mode, min, and max directly from the active Jupyter Kernel memory state.
-    """
+    """Retrieves column metrics directly from the kernel DataFrame."""
     if not st.session_state["kernel"]:
         return None, None
 
@@ -343,7 +352,7 @@ if 'df' in globals() and isinstance(df, pd.DataFrame):
 
 
 def get_questions() -> list[str]:
-    """Generates analytical questions by inspecting the live active DataFrame schema inside the Jupyter kernel."""
+    """Generates schema-aware questions via LLM structured outputs."""
     if not st.session_state.get("kernel") or not llm:
         return []
 
@@ -363,9 +372,9 @@ Given the CURRENT active state of the pandas DataFrame 'df' running in memory:
 - **Active Columns, Dtypes, and Summaries**:
 {cols_summary_str}
 
-Generate 10 actionable specific analytical short questions or visualization ideas.
+Generate 10 actionable analytical short questions or visualization ideas.
 
-Return ONLY the list of 10 structured questions."""
+Return ONLY the structured list of 10 questions."""
 
     question_gen_prompt = PromptTemplate.from_template(question_gen_prompt_template)
     llm_structured = llm.with_structured_output(ListFormatter)
@@ -389,7 +398,7 @@ Return ONLY the list of 10 structured questions."""
 
 
 def execute_and_render(code_response: str):
-    """Executes code in active Jupyter Kernel and renders rich outputs."""
+    """Executes Python code block in kernel and renders output objects."""
     match = re.search(r"```python\s*\n(.*?)```", code_response, re.DOTALL)
     code = match.group(1) if match else code_response.strip()
 
@@ -431,7 +440,7 @@ def execute_and_render(code_response: str):
 
 
 def generate_jupyter_notebook() -> str:
-    """Converts the conversation chat history into a downloadable .ipynb JSON structure."""
+    """Converts conversation history to downloadable .ipynb format."""
     notebook = {
         "cells": [],
         "metadata": {
@@ -485,7 +494,7 @@ def generate_jupyter_notebook() -> str:
 
 
 def render_buttons() -> None:
-    """Renders quick-select suggestion buttons above the chat bar."""
+    """Renders dynamic quick query buttons."""
     if st.session_state["questions"]:
         q1, q2, q3 = st.session_state["questions"][:3]
         left, mid, right = st.columns([1, 1, 1])
@@ -504,17 +513,25 @@ def render_buttons() -> None:
 # ---------------------------------------------------------------------------- #
 #                                    UI Loop                                   #
 # ---------------------------------------------------------------------------- #
-
 if st.session_state["df"] is not None:
-    # Initialize Kernel and Questions if needed
+    # Kernel initialization flow
     if st.session_state["kernel"] is None or st.session_state["questions"] is None:
         with st.sidebar:
             with st.status("Initializing Data Context...", expanded=True) as status:
                 if st.session_state["kernel"] is None:
                     st.write("Starting Jupyter Kernel...")
-                    st.session_state["kernel"] = StreamlitJupyterKernel()
-                    st.session_state["kernel"].inject_dataframe(st.session_state["df"])
-                    st.write("✓ Interactive Jupyter kernel ready")
+                    kernel_obj = StreamlitJupyterKernel()
+                    success, error_msg = kernel_obj.inject_dataframe(
+                        st.session_state["df"]
+                    )
+
+                    if success:
+                        st.session_state["kernel"] = kernel_obj
+                        st.write("✓ Interactive Jupyter kernel ready")
+                    else:
+                        st.error("Failed to load DataFrame into Kernel:")
+                        st.code(error_msg)
+                        st.stop()
 
                 if st.session_state["questions"] is None and llm is not None:
                     try:
@@ -544,7 +561,7 @@ if st.session_state["df"] is not None:
     else:
         st.sidebar.warning("No active `df` found in kernel.")
 
-    # Variable Inspection Sidebar
+    # Memory Inspection Sidebar
     with st.sidebar.expander("Current Kernel Variables", expanded=False):
         if st.session_state["kernel"]:
             manifest = st.session_state["kernel"].get_kernel_memory_manifest()
@@ -594,7 +611,7 @@ if st.session_state["df"] is not None:
             use_container_width=True,
         )
 
-    # Main Chat View
+    # Main Chat Interface
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             if message["role"] == "user":
@@ -607,9 +624,7 @@ if st.session_state["df"] is not None:
     st.divider()
     render_buttons()
 
-    chat_box_input = st.chat_input(
-        "Ask a question or type / code to execute directly..."
-    )
+    chat_box_input = st.chat_input("Ask a question or type / python code...")
     if chat_box_input:
         st.session_state.user_input = chat_box_input
 
@@ -622,7 +637,7 @@ if st.session_state["df"] is not None:
 
         st.session_state.messages.append({"role": "user", "content": prompt})
 
-        # Slash Command Execution
+        # Direct Slash Execution
         if prompt.strip().startswith("/"):
             raw_code = extract_command(prompt)
             formatted_response = f"```python\n{raw_code}\n```"
@@ -637,7 +652,7 @@ if st.session_state["df"] is not None:
             )
             execute_and_render(formatted_response)
 
-        # LLM Natural Language Query
+        # LLM Standard Stream Prompt
         else:
             if not llm:
                 st.error("API Key missing. Please set your Groq API Key.")
@@ -686,10 +701,8 @@ else:
                 st.session_state["df"] = pd.read_csv(file)
                 st.session_state["questions"] = None
 
-                if (
-                    st.session_state["kernel"] is not None
-                    and hasattr(st.session_state["kernel"], "stop")
-                    and callable(st.session_state["kernel"].stop)
+                if st.session_state["kernel"] is not None and hasattr(
+                    st.session_state["kernel"], "stop"
                 ):
                     st.session_state["kernel"].stop()
 
