@@ -1,4 +1,4 @@
-# Data Analysis Engine
+# Zeno 2
 
 A Streamlit application that automates data analysis by translating natural language into executable Python code. The application maintains an active Jupyter kernel in the background to preserve session state, manage dataset memory, and render interactive visualizations natively within the UI.
 
