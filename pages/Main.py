@@ -23,7 +23,7 @@ pio.templates.default = "plotly_dark"
 
 
 # ---------------------------------------------------------------------------- #
-#                              Jupyter Kernel Manager                          #
+#                            Jupyter Kernel Manager                            #
 # ---------------------------------------------------------------------------- #
 class StreamlitJupyterKernel:
     """Manages an active ipykernel session per Streamlit session state."""
@@ -78,7 +78,7 @@ class StreamlitJupyterKernel:
                 outputs.append({"type": "display_data", "data": content["data"]})
             elif msg_type == "error":
                 outputs.append({"type": "error", "traceback": content["traceback"]})
-            elif msg_type == "status" and content["execution_state"] == "idle":
+            elif msg_type == "status" and content.get("execution_state") == "idle":
                 break
 
         return outputs
@@ -98,13 +98,8 @@ import matplotlib.pyplot as plt
 import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
+
 pio.templates.default = "plotly_dark"
-
-if not hasattr(px, 'figure'):
-    px.figure = go.Figure
-if not hasattr(px, 'Figure'):
-    px.Figure = go.Figure
-
 pio.renderers.default = 'notebook_connected'
 {var_name} = pd.read_csv('{clean_path}')
 """
@@ -148,13 +143,11 @@ print("MANIFEST_START" + json.dumps(_vars_summary) + "MANIFEST_END")
         for out in outputs:
             if out["type"] == "stream" and "MANIFEST_START" in out["text"]:
                 try:
-                    raw_json = (
-                        out["text"]
-                        .split("MANIFEST_START")[1]
-                        .split("MANIFEST_END")[0]
-                        .strip()
+                    match = re.search(
+                        r"MANIFEST_START(.*?)MANIFEST_END", out["text"], re.DOTALL
                     )
-                    return json.loads(raw_json)
+                    if match:
+                        return json.loads(match.group(1).strip())
                 except Exception:
                     break
         return {}
@@ -175,7 +168,7 @@ print("MANIFEST_START" + json.dumps(_vars_summary) + "MANIFEST_END")
 
 
 # ---------------------------------------------------------------------------- #
-#                                Session State                                 #
+#                                 Session State                                #
 # ---------------------------------------------------------------------------- #
 if "kernel" not in st.session_state:
     st.session_state["kernel"] = None
@@ -184,7 +177,7 @@ if "questions" not in st.session_state:
     st.session_state["questions"] = None
 
 if "API" not in st.session_state:
-    st.session_state["API"] = st.secrets.get("API", "")
+    st.session_state["API"] = st.secrets.get("API", os.getenv("GROQ_API_KEY", ""))
 
 if "df" not in st.session_state:
     st.session_state["df"] = None
@@ -213,13 +206,13 @@ llm = None
 if st.session_state["API"]:
     llm = ChatGroq(
         groq_api_key=st.session_state["API"],
-        model_name="qwen/qwen3.8-27b",
+        model_name="qwen-2.5-32b",
         temperature=0.3,
     )
 
 
 # ---------------------------------------------------------------------------- #
-#                                  Functions                                   #
+#                                   Functions                                  #
 # ---------------------------------------------------------------------------- #
 def extract_command(input_text: str) -> str:
     """Strips the leading slash and cleans up markdown formatting."""
@@ -260,19 +253,20 @@ Requirements & Guidelines:
 1. State & Variable Continuity:
    - You MUST utilize active variables, created DataFrames, and modified schemas listed in the Kernel Memory State above.
    - Reuse existing variables directly instead of re-loading or re-calculating them.
-   Following import are already done, DO NOT IMPORT THEM AGAIN IN YOUR CODE BLOCKS:
-    import pandas as pd
-    import numpy as np
-    import matplotlib.pyplot as plt
-    import plotly.express as px
-    import plotly.graph_objects as go
-    import plotly.io as pio
+   The following imports are already loaded in kernel memory—DO NOT RE-IMPORT THEM:
+     import pandas as pd
+     import numpy as np
+     import matplotlib.pyplot as plt
+     import plotly.express as px
+     import plotly.graph_objects as go
+     import plotly.io as pio
+
 2. Code Standards:
-   - For Plots: Use Plotly only. IN plotly dark mode which is already set
-   - Plotly Rules:
-     * Use Plotly Express functions directly (`px.scatter()`, `px.bar()`, `px.line()`, `px.histogram()`).
-     * Always end visualization scripts with `fig.show()`.
-3. Return ONLY valid executable Python code wrapped inside standard ```python ... ``` code blocks.
+   - For Plots: Use Plotly Express (`px`) or Plotly Graph Objects (`go`). Dark mode is pre-configured.
+   - Always end visualization scripts with `fig.show()`.
+
+3. Output Format:
+   - Return ONLY valid executable Python code wrapped inside standard ```python ... ``` blocks.
 
 User Question:
 {user_prompt}"""
@@ -334,14 +328,12 @@ if 'df' in globals() and isinstance(df, pd.DataFrame):
     for out in outputs:
         if out["type"] == "stream" and "COL_INFO_START" in out["text"]:
             try:
-                raw_json = (
-                    out["text"]
-                    .split("COL_INFO_START")[1]
-                    .split("COL_INFO_END")[0]
-                    .strip()
+                match = re.search(
+                    r"COL_INFO_START(.*?)COL_INFO_END", out["text"], re.DOTALL
                 )
-                data = json.loads(raw_json)
-                return data["shape"], pd.DataFrame(data["columns"])
+                if match:
+                    data = json.loads(match.group(1).strip())
+                    return data["shape"], pd.DataFrame(data["columns"])
             except Exception:
                 break
     return None, None
@@ -349,10 +341,9 @@ if 'df' in globals() and isinstance(df, pd.DataFrame):
 
 def get_questions() -> list[str]:
     """Generates analytical questions by inspecting the live active DataFrame schema inside the Jupyter kernel."""
-    if not st.session_state.get("kernel"):
+    if not st.session_state.get("kernel") or not llm:
         return []
 
-    # 1. Fetch current shape and column metadata directly from active kernel memory
     shape, schema_df = get_active_dataframe_info()
 
     if schema_df is None or schema_df.empty:
@@ -362,7 +353,6 @@ def get_questions() -> list[str]:
         shape_str = f"{shape[0]} rows × {shape[1]} columns"
         cols_summary_str = json.dumps(schema_df.to_dict(orient="records"), indent=2)
 
-    # 2. Define schema-aware prompt template
     question_gen_prompt_template = """You are an expert Data Analyst and Analytics Engineer.
 
 Given the CURRENT active state of the pandas DataFrame 'df' running in memory:
@@ -387,7 +377,7 @@ Return ONLY the list of 10 structured questions."""
         )
         return result.questions
     except Exception as e:
-        st.sidebar.error(f"Failed to generate schema-aware questions: {e}")
+        st.sidebar.error(f"Failed to generate questions: {e}")
         return [
             "Show summary statistics for numerical columns.",
             "Plot distributions of key categorical variables.",
@@ -398,11 +388,8 @@ Return ONLY the list of 10 structured questions."""
 def execute_and_render(code_response: str):
     """Executes code in active Jupyter Kernel and renders rich outputs."""
     match = re.search(r"```python\s*\n(.*?)```", code_response, re.DOTALL)
-    if not match:
-        st.write(code_response)
-        return
+    code = match.group(1) if match else code_response.strip()
 
-    code = match.group(1)
     if not st.session_state["kernel"]:
         st.error("Jupyter kernel is not running.")
         return
@@ -418,7 +405,7 @@ def execute_and_render(code_response: str):
 
             if "application/vnd.plotly.v1+json" in data:
                 fig_dict = data["application/vnd.plotly.v1+json"]
-                st.plotly_chart(fig_dict, use_container_width=False)
+                st.plotly_chart(fig_dict, use_container_width=True)
 
             elif "text/html" in data:
                 html_str = data["text/html"]
@@ -456,7 +443,6 @@ def generate_jupyter_notebook() -> str:
         "nbformat_minor": 2,
     }
 
-    # Setup cell loading dataset
     file_name = st.session_state.get("file_name", "data.csv")
     setup_code = f"import pandas as pd\nimport plotly.express as px\n\ndf = pd.read_csv('{file_name}')\ndf.head()"
     notebook["cells"].append(
@@ -469,7 +455,6 @@ def generate_jupyter_notebook() -> str:
         }
     )
 
-    # Process user queries and generated assistant code
     for msg in st.session_state.messages:
         if msg["role"] == "user":
             notebook["cells"].append(
@@ -514,59 +499,49 @@ def render_buttons() -> None:
 
 
 # ---------------------------------------------------------------------------- #
-#                                   UI Loop                                    #
+#                                    UI Loop                                   #
 # ---------------------------------------------------------------------------- #
 
-
-# Persistent System Controls & Column Browser in Sidebar
-
-if st.session_state["df"] is not None and llm is not None:
-    # Initialize Kernel and Questions if needed (Status logged in Sidebar)
+if st.session_state["df"] is not None:
+    # Initialize Kernel and Questions if needed
     if st.session_state["kernel"] is None or st.session_state["questions"] is None:
         with st.sidebar:
             with st.status("Initializing Data Context...", expanded=True) as status:
                 if st.session_state["kernel"] is None:
-                    st.write(" Starting Jupyter Kernel...")
+                    st.write("Starting Jupyter Kernel...")
                     st.session_state["kernel"] = StreamlitJupyterKernel()
                     st.session_state["kernel"].inject_dataframe(st.session_state["df"])
                     st.write("✓ Interactive Jupyter kernel ready")
 
-                if st.session_state["questions"] is None:
+                if st.session_state["questions"] is None and llm is not None:
                     try:
-                        st.write(" Generating schema-aware questions...")
+                        st.write("Generating schema-aware questions...")
                         st.session_state["questions"] = get_questions()
                         st.write("✓ Generated exploration questions")
-                    except Exception as e:
-                        st.write(" Could not generate questions")
+                    except Exception:
+                        st.write("Could not generate questions")
 
                 status.update(label="System Ready!", state="complete", expanded=False)
 
-    # Idle state indicator in Sidebar
-    st.sidebar.success("🟢 Model Ready")
+    st.sidebar.success("🟢 Engine Active")
 
-    # ------------------------------------------------------------------------ #
-    # FEATURE 1: Live Dataset Explorer & Summary Statistics                    #
-    # ------------------------------------------------------------------------ #
+    # Dataset Summary Sidebar section
     st.sidebar.markdown("---")
     st.sidebar.markdown("### Dataset Summary")
 
-    # Recalculates dynamically from kernel memory on every rerun
     shape, schema_df = get_active_dataframe_info()
 
     if schema_df is not None and not schema_df.empty:
         st.sidebar.caption(
             f"**File:** `{st.session_state['file_name']}` ({shape[0]} rows × {shape[1]} cols)"
         )
-
-        with st.sidebar.expander(" Dataset Summary Statistics", expanded=False):
+        with st.sidebar.expander("Dataset Summary Statistics", expanded=False):
             schema_display = schema_df.set_index("Column")
             st.dataframe(schema_display, use_container_width=True)
     else:
         st.sidebar.warning("No active `df` found in kernel.")
 
-    # ------------------------------------------------------------------------ #
-    # FEATURE 2: Active Kernel Variables Inspection                            #
-    # ------------------------------------------------------------------------ #
+    # Variable Inspection Sidebar
     with st.sidebar.expander("Current Kernel Variables", expanded=False):
         if st.session_state["kernel"]:
             manifest = st.session_state["kernel"].get_kernel_memory_manifest()
@@ -590,13 +565,10 @@ if st.session_state["df"] is not None and llm is not None:
         else:
             st.info("Kernel not initialized.")
 
-    # ------------------------------------------------------------------------ #
-    # FEATURE 3: Chat Controls & Jupyter Notebook Download                     #
-    # ------------------------------------------------------------------------ #
+    # Controls Sidebar
     st.sidebar.markdown("---")
     st.sidebar.markdown("### Session Controls")
 
-    # Refresh Questions Button (Triggers kernel inspection & LLM call)
     if st.sidebar.button("Regenerate Suggestions", use_container_width=True):
         with st.sidebar:
             with st.spinner("Analyzing active kernel memory..."):
@@ -604,13 +576,11 @@ if st.session_state["df"] is not None and llm is not None:
         st.sidebar.success("Updated suggestions based on active kernel state!")
         st.rerun()
 
-    # Clear Chat History Button
-    if st.sidebar.button(" Clear Chat History", use_container_width=True):
+    if st.sidebar.button("Clear Chat History", use_container_width=True):
         st.session_state.messages = []
         st.sidebar.success("Chat history cleared!")
         st.rerun()
 
-    # Download Generated Code as Jupyter Notebook (.ipynb)
     if st.session_state.messages:
         nb_json = generate_jupyter_notebook()
         st.sidebar.download_button(
@@ -621,9 +591,7 @@ if st.session_state["df"] is not None and llm is not None:
             use_container_width=True,
         )
 
-    # ------------------------------------------------------------------------ #
-    # Main Chat Interface                                                      #
-    # ------------------------------------------------------------------------ #
+    # Main Chat View
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             if message["role"] == "user":
@@ -636,31 +604,25 @@ if st.session_state["df"] is not None and llm is not None:
     st.divider()
     render_buttons()
 
-    # Capture chat input
     chat_box_input = st.chat_input(
         "Ask a question or type / code to execute directly..."
     )
     if chat_box_input:
         st.session_state.user_input = chat_box_input
 
-    # Process pending input
     if st.session_state.user_input:
         prompt = st.session_state.user_input
         st.session_state.user_input = None
 
-        # Render User Message
         with st.chat_message("user"):
             st.markdown(prompt)
 
         st.session_state.messages.append({"role": "user", "content": prompt})
 
-        # Slash Command Logic (Direct Jupyter Kernel Execution)
+        # Slash Command Execution
         if prompt.strip().startswith("/"):
             raw_code = extract_command(prompt)
             formatted_response = f"```python\n{raw_code}\n```"
-
-            with st.sidebar:
-                st.spinner("⚡ Executing direct command in Jupyter Kernel...")
 
             with st.chat_message("assistant"):
                 st.caption("⚡ *Executed directly in Jupyter Kernel (LLM Bypassed)*")
@@ -670,48 +632,46 @@ if st.session_state["df"] is not None and llm is not None:
             st.session_state.messages.append(
                 {"role": "assistant", "content": formatted_response}
             )
-
             execute_and_render(formatted_response)
 
-        # Natural Language Query (Groq LLM Chain)
+        # LLM Natural Language Query
         else:
-            with st.sidebar:
-                sidebar_status = st.status("Zeno is thinking..", expanded=True)
+            if not llm:
+                st.error("API Key missing. Please set your Groq API Key.")
+            else:
+                with st.sidebar:
+                    sidebar_status = st.status("Engine is thinking..", expanded=True)
 
-            with st.chat_message("assistant"):
-                stream = get_answer(prompt)
-                full_response = st.write_stream(stream)
+                with st.chat_message("assistant"):
+                    stream = get_answer(prompt)
+                    full_response = st.write_stream(stream)
 
-            sidebar_status.update(
-                label="⚡ Code Executing in Kernel...", state="running"
-            )
+                sidebar_status.update(
+                    label="⚡ Code Executing in Kernel...", state="running"
+                )
 
-            st.session_state.messages.append(
-                {"role": "assistant", "content": full_response}
-            )
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": full_response}
+                )
 
-            execute_and_render(full_response)
-            sidebar_status.update(
-                label="✓ Execution Complete", state="complete", expanded=False
-            )
+                execute_and_render(full_response)
+                sidebar_status.update(
+                    label="✓ Execution Complete", state="complete", expanded=False
+                )
 
-        # Shuffle sample questions
         if st.session_state["questions"]:
             rd.shuffle(st.session_state["questions"])
 
         st.rerun()
 
 else:
-    # Main Page File Upload & Setup Form
     st.markdown("""
-    # Hmmmmm....
-
-    Ask **natural language questions** or execute **direct python commands** with full conversation memory inside a live Jupyter Kernel!
+    # Data Analysis Engine
+    Ask **natural language questions** or execute **direct python commands** with full state persistence inside a live Jupyter Kernel.
     """)
 
-    st.sidebar.info("Waiting for data file upload...")
+    st.sidebar.info("Waiting for dataset upload...")
 
-    # Main Page Form for File Upload
     with st.form("Start"):
         st.subheader("Upload Dataset to Begin")
         file = st.file_uploader("Upload CSV data file", type=["csv"])
