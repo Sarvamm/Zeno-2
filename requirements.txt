@@ -11,3 +11,4 @@ scipy
 matplotlib
 jupyter_client
 ipykernel
+nbformat
