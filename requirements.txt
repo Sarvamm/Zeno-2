@@ -1,0 +1,10 @@
+streamlit
+streamlit-extras
+langchain
+langchain_groq
+pydantic
+pandas
+plotly
+scikit-learn
+statsmodels
+scipy
