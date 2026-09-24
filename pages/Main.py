@@ -1,530 +1,55 @@
-# ---------------------------------------------------------------------------- #
-#                                   Imports                                    #
-# ---------------------------------------------------------------------------- #
-import json
 import os
 import random as rd
-import re
-import subprocess
-import sys
-import tempfile
-import uuid
+
 import pandas as pd
+import plotly.io as pio
 import streamlit as st
-import streamlit.components.v1 as components
-from jupyter_client import KernelManager
-from jupyter_client.kernelspec import KernelSpecManager
 
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import PromptTemplate
-from langchain_groq import ChatGroq
-from pydantic import BaseModel, Field
-
-import plotly.io as pio
-
+# Setup default configurations before any rendering
 pio.templates.default = "plotly_dark"
+st.set_page_config(page_title="Data Analysis Engine", layout="wide")
 
-
-# ---------------------------------------------------------------------------- #
-#                            Jupyter Kernel Manager                            #
-# ---------------------------------------------------------------------------- #
-class StreamlitJupyterKernel:
-    """Manages an active ipykernel session bound directly to the current runtime environment."""
-
-    def __init__(self):
-        # 1. Ensure a kernel spec tied specifically to the current venv executable exists
-        kernel_name = self._ensure_env_kernelspec()
-
-        # 2. Start kernel instance
-        self.km = KernelManager(kernel_name=kernel_name)
-        self.km.start_kernel()
-        self.kc = self.km.client()
-        self.kc.start_channels()
-        self.kc.wait_for_ready(timeout=15)
-
-    def _ensure_env_kernelspec(self) -> str:
-        """Registers a dedicated Jupyter kernel spec matching current sys.executable."""
-        ksm = KernelSpecManager()
-        kernel_name = f"streamlit_env_{sys.version_info.major}_{sys.version_info.minor}"
-
-        if kernel_name not in ksm.get_all_specs():
-            subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "ipykernel",
-                    "install",
-                    "--user",
-                    "--name",
-                    kernel_name,
-                    "--display-name",
-                    "Streamlit Environment Python",
-                ],
-                check=True,
-            )
-        return kernel_name
-
-    def execute_code(self, code: str, timeout: int = 20) -> list[dict]:
-        """Executes Python code inside the kernel and returns captured outputs."""
-        msg_id = self.kc.execute(code)
-        outputs = []
-
-        while True:
-            try:
-                msg = self.kc.get_iopub_msg(timeout=timeout)
-            except Exception:
-                break
-
-            if msg["parent_header"].get("msg_id") != msg_id:
-                continue
-
-            msg_type = msg["header"]["msg_type"]
-            content = msg["content"]
-
-            if msg_type == "stream":
-                outputs.append({"type": "stream", "text": content["text"]})
-            elif msg_type in ("display_data", "execute_result"):
-                outputs.append({"type": "display_data", "data": content["data"]})
-            elif msg_type == "error":
-                outputs.append({"type": "error", "traceback": content["traceback"]})
-            elif msg_type == "status" and content.get("execution_state") == "idle":
-                break
-
-        return outputs
-
-    def inject_dataframe(
-        self, df: pd.DataFrame, var_name: str = "df"
-    ) -> tuple[bool, str | None]:
-        """Injects a pandas DataFrame into global kernel memory and checks for errors."""
-        temp_dir = tempfile.gettempdir()
-        temp_csv_path = os.path.join(temp_dir, f"data_{uuid.uuid4().hex[:8]}.csv")
-        clean_path = temp_csv_path.replace("\\", "/")
-
-        df.to_csv(temp_csv_path, index=False)
-
-        init_code = f"""
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import plotly.express as px
-import plotly.graph_objects as go
-import plotly.io as pio
-
-pio.templates.default = "plotly_dark"
-pio.renderers.default = 'notebook_connected'
-{var_name} = pd.read_csv('{clean_path}')
-"""
-        outputs = self.execute_code(init_code, timeout=30)
-
-        for out in outputs:
-            if out.get("type") == "error":
-                clean_tb = "\n".join(
-                    [re.sub(r"\x1b\[[0-9;]*m", "", line) for line in out["traceback"]]
-                )
-                return False, clean_tb
-
-        return True, None
-
-    def get_kernel_memory_manifest(self) -> dict:
-        """Inspects active global scope variables inside the running kernel."""
-        inspection_code = """
-import json
-import pandas as pd
-
-_vars_summary = {}
-_ignore_keys = {'In', 'Out', 'exit', 'quit', 'get_ipython', 'pd', 'px', 'go', 'pio', 'json', 'np', 'plt'}
-
-for _k, _v in list(globals().items()):
-    if not _k.startswith('_') and _k not in _ignore_keys:
-        if isinstance(_v, pd.DataFrame):
-            _vars_summary[_k] = {
-                "type": "DataFrame",
-                "shape": list(_v.shape),
-                "columns": _v.columns.tolist(),
-                "dtypes": {col: str(dtype) for col, dtype in _v.dtypes.items()}
-            }
-        elif isinstance(_v, pd.Series):
-            _vars_summary[_k] = {
-                "type": "Series",
-                "shape": list(_v.shape),
-                "dtype": str(_v.dtype)
-            }
-        elif type(_v).__name__ in ('int', 'float', 'str', 'bool', 'list', 'dict', 'tuple', 'set'):
-            val_str = str(_v)
-            _vars_summary[_k] = {
-                "type": type(_v).__name__,
-                "value": val_str[:100] + "..." if len(val_str) > 100 else val_str
-            }
-
-print("MANIFEST_START" + json.dumps(_vars_summary) + "MANIFEST_END")
-"""
-        outputs = self.execute_code(inspection_code)
-
-        for out in outputs:
-            if out["type"] == "stream" and "MANIFEST_START" in out["text"]:
-                try:
-                    match = re.search(
-                        r"MANIFEST_START(.*?)MANIFEST_END", out["text"], re.DOTALL
-                    )
-                    if match:
-                        return json.loads(match.group(1).strip())
-                except Exception:
-                    break
-        return {}
-
-    def stop(self):
-        """Cleanly halts channels and terminates the Jupyter subprocess."""
-        try:
-            if hasattr(self, "kc") and self.kc is not None:
-                self.kc.stop_channels()
-        except Exception:
-            pass
-
-        try:
-            if hasattr(self, "km") and self.km is not None:
-                self.km.shutdown_kernel(now=True)
-        except Exception:
-            pass
-
+# Import Modularized Components
+from components.chat_ui import execute_and_render, render_buttons
+from components.sidebar import render_sidebar
+from services.kernel_manager import StreamlitJupyterKernel
+from services.llm_agent import generate_questions, get_answer
+from utils.formatters import extract_command, format_history_for_prompt
 
 # ---------------------------------------------------------------------------- #
-#                                 Session State                                #
+#                             Session State Setup                              #
 # ---------------------------------------------------------------------------- #
 if "kernel" not in st.session_state:
     st.session_state["kernel"] = None
-
 if "questions" not in st.session_state:
     st.session_state["questions"] = None
-
 if "API" not in st.session_state:
     st.session_state["API"] = st.secrets.get("API", os.getenv("GROQ_API_KEY", ""))
-
 if "df" not in st.session_state:
     st.session_state["df"] = None
-
 if "file_name" not in st.session_state:
     st.session_state["file_name"] = None
-
 if "messages" not in st.session_state:
     st.session_state.messages = []
-
 if "user_input" not in st.session_state:
     st.session_state.user_input = None
 
 
 # ---------------------------------------------------------------------------- #
-#                               Schema Definition                              #
-# ---------------------------------------------------------------------------- #
-class ListFormatter(BaseModel):
-    questions: list[str] = Field(
-        description="List of 10 actionable data analysis questions"
-    )
-
-
-# ---------------------------------------------------------------------------- #
-#                              LLM Initialization                              #
-# ---------------------------------------------------------------------------- #
-llm = None
-if st.session_state["API"]:
-    llm = ChatGroq(
-        groq_api_key=st.session_state["API"],
-        model_name="qwen/qwen3.8-27b",
-        temperature=0.3,
-    )
-
-
-# ---------------------------------------------------------------------------- #
-#                               Helper Functions                               #
-# ---------------------------------------------------------------------------- #
-def extract_command(input_text: str) -> str:
-    """Strips leading slashes and extracts raw python blocks."""
-    cmd = input_text.lstrip("/").strip()
-    match = re.search(r"```(?:python)?\s*\n?(.*?)```", cmd, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return cmd
-
-
-def format_history_for_prompt() -> str:
-    """Formats prior chat messages for the LLM prompt context."""
-    if not st.session_state.messages:
-        return "No prior conversation."
-
-    history = []
-    for msg in st.session_state.messages:
-        role = "User" if msg["role"] == "user" else "Assistant (Executed Code)"
-        history.append(f"{role}:\n{msg['content']}\n")
-
-    return "\n".join(history[-6:])
-
-
-def get_answer(user_prompt: str):
-    kernel_manifest = {}
-    if st.session_state["kernel"]:
-        kernel_manifest = st.session_state["kernel"].get_kernel_memory_manifest()
-
-    task_prompt_template = """You are an expert Data Analyst operating inside a persistent Jupyter Kernel session.
-
-Active Jupyter Kernel Memory State:
-{kernel_manifest}
-
-Execution History:
-{history}
-
-Requirements & Guidelines:
-1. State & Variable Continuity:
-   - Reuse active variables and DataFrames directly instead of re-loading or re-calculating.
-   - Pre-loaded imports (DO NOT RE-IMPORT): pandas as pd, numpy as np, matplotlib.pyplot as plt, plotly.express as px, plotly.graph_objects as go, plotly.io as pio.
-
-2. Code Standards:
-   - For Visualizations: Use Plotly Express (`px`) or Plotly Graph Objects (`go`). Always call `fig.show()`.
-
-3. Output Format:
-   - Return ONLY executable Python code inside standard ```python ... ``` markdown blocks.
-
-User Question:
-{user_prompt}"""
-
-    task_prompt = PromptTemplate.from_template(task_prompt_template)
-    task_chain = task_prompt | llm | StrOutputParser()
-
-    return task_chain.stream(
-        {
-            "kernel_manifest": json.dumps(kernel_manifest, indent=2),
-            "history": format_history_for_prompt(),
-            "user_prompt": user_prompt,
-        }
-    )
-
-
-def get_active_dataframe_info() -> tuple[list[int] | None, pd.DataFrame | None]:
-    """Retrieves column metrics directly from the kernel DataFrame."""
-    if not st.session_state["kernel"]:
-        return None, None
-
-    inspection_code = """
-import json
-import pandas as pd
-
-if 'df' in globals() and isinstance(df, pd.DataFrame):
-    _info = []
-    for col in df.columns:
-        s = df[col]
-        entry = {
-            "Column": str(col),
-            "Data Type": str(s.dtype),
-            "Missing": int(s.isnull().sum()),
-            "Unique": int(s.nunique())
-        }
-        if pd.api.types.is_numeric_dtype(s):
-            clean_s = s.dropna()
-            entry["Mean"] = round(float(clean_s.mean()), 4) if not clean_s.empty else None
-            entry["Median"] = round(float(clean_s.median()), 4) if not clean_s.empty else None
-            mode_val = clean_s.mode()
-            entry["Mode"] = round(float(mode_val.iloc[0]), 4) if not mode_val.empty else None
-            entry["Min"] = round(float(clean_s.min()), 4) if not clean_s.empty else None
-            entry["Max"] = round(float(clean_s.max()), 4) if not clean_s.empty else None
-        else:
-            clean_s = s.dropna()
-            mode_val = clean_s.mode()
-            entry["Mean"] = "-"
-            entry["Median"] = "-"
-            entry["Mode"] = str(mode_val.iloc[0]) if not mode_val.empty else "-"
-            entry["Min"] = str(clean_s.min()) if not clean_s.empty else "-"
-            entry["Max"] = str(clean_s.max()) if not clean_s.empty else "-"
-        _info.append(entry)
-    print("COL_INFO_START" + json.dumps({"shape": list(df.shape), "columns": _info}) + "COL_INFO_END")
-"""
-    outputs = st.session_state["kernel"].execute_code(inspection_code)
-
-    for out in outputs:
-        if out["type"] == "stream" and "COL_INFO_START" in out["text"]:
-            try:
-                match = re.search(
-                    r"COL_INFO_START(.*?)COL_INFO_END", out["text"], re.DOTALL
-                )
-                if match:
-                    data = json.loads(match.group(1).strip())
-                    return data["shape"], pd.DataFrame(data["columns"])
-            except Exception:
-                break
-    return None, None
-
-
-def get_questions() -> list[str]:
-    """Generates schema-aware questions via LLM structured outputs."""
-    if not st.session_state.get("kernel") or not llm:
-        return []
-
-    shape, schema_df = get_active_dataframe_info()
-
-    if schema_df is None or schema_df.empty:
-        cols_summary_str = "No active DataFrame found."
-        shape_str = "Unknown"
-    else:
-        shape_str = f"{shape[0]} rows × {shape[1]} columns"
-        cols_summary_str = json.dumps(schema_df.to_dict(orient="records"), indent=2)
-
-    question_gen_prompt_template = """You are an expert Data Analyst and Analytics Engineer.
-
-Given the CURRENT active state of the pandas DataFrame 'df' running in memory:
-- **Dataset Dimensions**: {shape_str}
-- **Active Columns, Dtypes, and Summaries**:
-{cols_summary_str}
-
-Generate 10 actionable analytical short questions or visualization ideas.
-
-Return ONLY the structured list of 10 questions."""
-
-    question_gen_prompt = PromptTemplate.from_template(question_gen_prompt_template)
-    llm_structured = llm.with_structured_output(ListFormatter)
-    question_gen_chain = question_gen_prompt | llm_structured
-
-    try:
-        result: ListFormatter = question_gen_chain.invoke(
-            {
-                "shape_str": shape_str,
-                "cols_summary_str": cols_summary_str,
-            }
-        )
-        return result.questions
-    except Exception as e:
-        st.sidebar.error(f"Failed to generate questions: {e}")
-        return [
-            "Show summary statistics for numerical columns.",
-            "Plot distributions of key categorical variables.",
-            "Check for correlations across the dataset.",
-        ]
-
-
-def execute_and_render(code_response: str):
-    """Executes Python code block in kernel and renders output objects."""
-    match = re.search(r"```python\s*\n(.*?)```", code_response, re.DOTALL)
-    code = match.group(1) if match else code_response.strip()
-
-    if not st.session_state["kernel"]:
-        st.error("Jupyter kernel is not running.")
-        return
-
-    outputs = st.session_state["kernel"].execute_code(code)
-
-    for out in outputs:
-        if out["type"] == "stream":
-            st.text(out["text"])
-
-        elif out["type"] == "display_data":
-            data = out["data"]
-
-            if "application/vnd.plotly.v1+json" in data:
-                fig_dict = data["application/vnd.plotly.v1+json"]
-                st.plotly_chart(fig_dict, use_container_width=True)
-
-            elif "text/html" in data:
-                html_str = data["text/html"]
-                if "plotly-graph-div" in html_str:
-                    components.html(html_str, height=500, scrolling=True)
-                else:
-                    st.markdown(html_str, unsafe_allow_html=True)
-
-            elif "image/png" in data:
-                st.image(data["image/png"])
-
-            elif "text/plain" in data:
-                st.code(data["text/plain"], language="text")
-
-        elif out["type"] == "error":
-            clean_tb = "\n".join(
-                [re.sub(r"\x1b\[[0-9;]*m", "", line) for line in out["traceback"]]
-            )
-            st.error(f"Execution Error:\n```\n{clean_tb}\n```")
-
-
-def generate_jupyter_notebook() -> str:
-    """Converts conversation history to downloadable .ipynb format."""
-    notebook = {
-        "cells": [],
-        "metadata": {
-            "kernelspec": {
-                "display_name": "Python 3",
-                "language": "python",
-                "name": "python3",
-            },
-            "language_info": {"name": "python", "version": "3.10"},
-        },
-        "nbformat": 4,
-        "nbformat_minor": 2,
-    }
-
-    file_name = st.session_state.get("file_name", "data.csv")
-    setup_code = f"import pandas as pd\nimport plotly.express as px\n\ndf = pd.read_csv('{file_name}')\ndf.head()"
-    notebook["cells"].append(
-        {
-            "cell_type": "code",
-            "execution_count": None,
-            "metadata": {},
-            "outputs": [],
-            "source": [line + "\n" for line in setup_code.split("\n")],
-        }
-    )
-
-    for msg in st.session_state.messages:
-        if msg["role"] == "user":
-            notebook["cells"].append(
-                {
-                    "cell_type": "markdown",
-                    "metadata": {},
-                    "source": [f"### User: {msg['content']}\n"],
-                }
-            )
-        elif msg["role"] == "assistant":
-            match = re.search(r"```python\s*\n(.*?)```", msg["content"], re.DOTALL)
-            code_str = match.group(1) if match else msg["content"]
-
-            notebook["cells"].append(
-                {
-                    "cell_type": "code",
-                    "execution_count": None,
-                    "metadata": {},
-                    "outputs": [],
-                    "source": [line + "\n" for line in code_str.split("\n")],
-                }
-            )
-
-    return json.dumps(notebook, indent=2)
-
-
-def render_buttons() -> None:
-    """Renders dynamic quick query buttons."""
-    if st.session_state["questions"]:
-        q1, q2, q3 = st.session_state["questions"][:3]
-        left, mid, right = st.columns([1, 1, 1])
-
-        if left.button(q1, key=f"q1_{q1[:10]}"):
-            st.session_state.user_input = q1
-            st.rerun()
-        if mid.button(q2, key=f"q2_{q2[:10]}"):
-            st.session_state.user_input = q2
-            st.rerun()
-        if right.button(q3, key=f"q3_{q3[:10]}"):
-            st.session_state.user_input = q3
-            st.rerun()
-
-
-# ---------------------------------------------------------------------------- #
-#                                    UI Loop                                   #
+#                                Main App Loop                                 #
 # ---------------------------------------------------------------------------- #
 if st.session_state["df"] is not None:
-    # Kernel initialization flow
+    # 1. Kernel & LLM Initialization flow
     if st.session_state["kernel"] is None or st.session_state["questions"] is None:
         with st.sidebar:
             with st.status("Initializing Data Context...", expanded=True) as status:
+                # Boot Kernel
                 if st.session_state["kernel"] is None:
                     st.write("Starting Jupyter Kernel...")
                     kernel_obj = StreamlitJupyterKernel()
                     success, error_msg = kernel_obj.inject_dataframe(
                         st.session_state["df"]
                     )
-
                     if success:
                         st.session_state["kernel"] = kernel_obj
                         st.write("✓ Interactive Jupyter kernel ready")
@@ -533,85 +58,46 @@ if st.session_state["df"] is not None:
                         st.code(error_msg)
                         st.stop()
 
-                if st.session_state["questions"] is None and llm is not None:
+                # Boot LLM Questions
+                if st.session_state["questions"] is None and st.session_state["API"]:
                     try:
                         st.write("Generating schema-aware questions...")
-                        st.session_state["questions"] = get_questions()
+                        st.session_state["questions"] = generate_questions(
+                            st.session_state["kernel"], st.session_state["API"]
+                        )
                         st.write("✓ Generated exploration questions")
-                    except Exception:
-                        st.write("Could not generate questions")
+                    except Exception as e:
+                        st.write(f"Could not generate questions: {e}")
 
                 status.update(label="System Ready!", state="complete", expanded=False)
 
-    st.sidebar.success("🟢 Engine Active")
+    # 2. Render Sidebar
+    render_sidebar()
 
-    # Dataset Summary Sidebar section
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### Dataset Summary")
+    # 3. Render Historical Chat Interface
+    st.markdown(
+        """<div align="center">
 
-    shape, schema_df = get_active_dataframe_info()
+# Zeno is ready!
 
-    if schema_df is not None and not schema_df.empty:
-        st.sidebar.caption(
-            f"**File:** `{st.session_state['file_name']}` ({shape[0]} rows × {shape[1]} cols)"
-        )
-        with st.sidebar.expander("Dataset Summary Statistics", expanded=False):
-            schema_display = schema_df.set_index("Column")
-            st.dataframe(schema_display, use_container_width=True)
-    else:
-        st.sidebar.warning("No active `df` found in kernel.")
 
-    # Memory Inspection Sidebar
-    with st.sidebar.expander("Current Kernel Variables", expanded=False):
-        if st.session_state["kernel"]:
-            manifest = st.session_state["kernel"].get_kernel_memory_manifest()
-            if manifest:
-                var_rows = []
-                for var_name, var_info in manifest.items():
-                    v_type = var_info.get("type", "Unknown")
-                    if v_type in ("DataFrame", "Series"):
-                        details = f"Shape: {var_info.get('shape')}"
-                    else:
-                        details = str(var_info.get("value", ""))
-                    var_rows.append(
-                        {"Variable": var_name, "Type": v_type, "Details": details}
-                    )
-                st.dataframe(
-                    pd.DataFrame(var_rows).set_index("Variable"),
-                    use_container_width=True,
-                )
-            else:
-                st.info("No active user variables in kernel memory.")
-        else:
-            st.info("Kernel not initialized.")
+##### **Try asking:** 
+*"Summarize this dataset"*<br>
+*"Are there missing values or outliers?"*<br>
+*"Perform correlation analysis"* <br>
 
-    # Controls Sidebar
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### Session Controls")
+</div>
 
-    if st.sidebar.button("Regenerate Suggestions", use_container_width=True):
-        with st.sidebar:
-            with st.spinner("Analyzing active kernel memory..."):
-                st.session_state["questions"] = get_questions()
-        st.sidebar.success("Updated suggestions based on active kernel state!")
-        st.rerun()
-
-    if st.sidebar.button("Clear Chat History", use_container_width=True):
-        st.session_state.messages = []
-        st.sidebar.success("Chat history cleared!")
-        st.rerun()
-
-    if st.session_state.messages:
-        nb_json = generate_jupyter_notebook()
-        st.sidebar.download_button(
-            label="Download Notebook (.ipynb)",
-            data=nb_json,
-            file_name=f"analysis_{uuid.uuid4().hex[:6]}.ipynb",
-            mime="application/x-ipynb+json",
-            use_container_width=True,
-        )
-
-    # Main Chat Interface
+""",
+        unsafe_allow_html=True,
+    )
+    st.image("assets/chat_intro.png", use_container_width=True)
+    st.markdown(
+        """<div align = 'center'>
+Or select a recommendation below: <div>
+                 """,
+        unsafe_allow_html=True,
+    )
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             if message["role"] == "user":
@@ -619,11 +105,12 @@ if st.session_state["df"] is not None:
             elif message["role"] == "assistant":
                 with st.expander("View Executed Code"):
                     st.code(message["content"], language="python")
-                execute_and_render(message["content"])
+                execute_and_render(message["content"], st.session_state["kernel"])
 
     st.divider()
     render_buttons()
 
+    # 4. Input Handling
     chat_box_input = st.chat_input("Ask a question or type / python code...")
     if chat_box_input:
         st.session_state.user_input = chat_box_input
@@ -637,7 +124,7 @@ if st.session_state["df"] is not None:
 
         st.session_state.messages.append({"role": "user", "content": prompt})
 
-        # Direct Slash Execution
+        # Branch A: Direct Slash Command Execution
         if prompt.strip().startswith("/"):
             raw_code = extract_command(prompt)
             formatted_response = f"```python\n{raw_code}\n```"
@@ -650,39 +137,47 @@ if st.session_state["df"] is not None:
             st.session_state.messages.append(
                 {"role": "assistant", "content": formatted_response}
             )
-            execute_and_render(formatted_response)
+            execute_and_render(formatted_response, st.session_state["kernel"])
 
-        # LLM Standard Stream Prompt
+        # Branch B: Standard LLM Query Processing
         else:
-            if not llm:
+            if not st.session_state["API"]:
                 st.error("API Key missing. Please set your Groq API Key.")
             else:
                 with st.sidebar:
                     sidebar_status = st.status("Engine is thinking..", expanded=True)
 
                 with st.chat_message("assistant"):
-                    stream = get_answer(prompt)
+                    kernel_manifest = st.session_state[
+                        "kernel"
+                    ].get_kernel_memory_manifest()
+                    history_str = format_history_for_prompt(st.session_state.messages)
+
+                    stream = get_answer(
+                        prompt, kernel_manifest, history_str, st.session_state["API"]
+                    )
                     full_response = st.write_stream(stream)
 
                 sidebar_status.update(
                     label="⚡ Code Executing in Kernel...", state="running"
                 )
-
                 st.session_state.messages.append(
                     {"role": "assistant", "content": full_response}
                 )
 
-                execute_and_render(full_response)
+                execute_and_render(full_response, st.session_state["kernel"])
                 sidebar_status.update(
                     label="✓ Execution Complete", state="complete", expanded=False
                 )
 
+        # Shuffle suggestion buttons on completion
         if st.session_state["questions"]:
             rd.shuffle(st.session_state["questions"])
 
         st.rerun()
 
 else:
+    # 5. Onboarding / File Upload UI
     st.markdown("""
     # Data Analysis Engine
     Ask **natural language questions** or execute **direct python commands** with full state persistence inside a live Jupyter Kernel.
