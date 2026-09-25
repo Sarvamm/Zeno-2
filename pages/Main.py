@@ -179,7 +179,7 @@ Or select a recommendation below: <div>
 else:
     # 5. Onboarding / File Upload UI
     st.markdown("""
-    # Data Analysis Engine
+    # Welcome to Zeno 2
     Ask **natural language questions** or execute **direct python commands** with full state persistence inside a live Jupyter Kernel.
     """)
 
