@@ -1,5 +1,8 @@
 # Zeno 2
 
+![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)
+![License](https://img.shields.io/badge/license-MIT-green.svg)
+
 A Streamlit application that automates data analysis by translating natural language into executable Python code. The application maintains an active Jupyter kernel in the background to preserve session state, manage dataset memory, and render interactive visualizations natively within the UI.
 
 ## Core Features
