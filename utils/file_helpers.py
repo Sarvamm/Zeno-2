@@ -18,7 +18,25 @@ def generate_jupyter_notebook(messages: list, file_name: str) -> str:
         "nbformat_minor": 2,
     }
 
-    setup_code = f"import pandas as pd\nimport plotly.express as px\n\ndf = pd.read_csv('{file_name}')\ndf.head()"
+    setup_code = f"""
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import plotly.express as px
+import plotly.graph_objects as go
+import plotly.io as pio
+from sinica import ProfileReport
+
+pio.templates.default = "plotly_dark"
+pio.renderers.default = 'notebook_connected'
+
+df = pd.read_csv('{file_name}')
+
+pr = ProfileReport(df)
+
+summary_df = pr.summary() 
+alerts_df = pr.alerts()   
+"""
     notebook["cells"].append(
         {
             "cell_type": "code",

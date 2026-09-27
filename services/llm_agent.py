@@ -1,11 +1,12 @@
 import json
-from pydantic import BaseModel, Field
-from langchain_groq import ChatGroq
-from langchain_core.prompts import PromptTemplate
-from langchain_core.output_parsers import StrOutputParser
 
-from config.prompts import TASK_PROMPT_TEMPLATE, QUESTION_GEN_PROMPT_TEMPLATE
-from services.kernel_manager import get_active_dataframe_info, StreamlitJupyterKernel
+from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
+from langchain_core.prompts import PromptTemplate
+from langchain_groq import ChatGroq
+from pydantic import BaseModel, Field
+
+from config.prompts import QUESTION_GEN_PROMPT_TEMPLATE, TASK_PROMPT_TEMPLATE
+from services.kernel_manager import StreamlitJupyterKernel, get_active_dataframe_info
 
 
 class ListFormatter(BaseModel):
@@ -16,8 +17,8 @@ class ListFormatter(BaseModel):
 
 def get_llm(api_key: str):
     return ChatGroq(
-        groq_api_key=api_key,
-        model_name="qwen/qwen3.8-27b",
+        groq_api_key=api_key,  # type: ignore
+        model_name="openai/gpt-oss-120b",  # type: ignore
         temperature=0.3,
     )
 
@@ -38,30 +39,39 @@ def get_answer(user_prompt: str, kernel_manifest: dict, history_str: str, api_ke
 
 def generate_questions(kernel: StreamlitJupyterKernel, api_key: str) -> list[str]:
     llm = get_llm(api_key)
-    shape, schema_df = get_active_dataframe_info(kernel)
+    schema_df = get_active_dataframe_info(kernel)[1]
 
     if schema_df is None or schema_df.empty:
         cols_summary_str = "No active DataFrame found."
-        shape_str = "Unknown"
     else:
-        shape_str = f"{shape[0]} rows × {shape[1]} columns"
-        cols_summary_str = json.dumps(schema_df.to_dict(orient="records"), indent=2)
+        cols_summary_str = json.dumps(
+            schema_df.to_dict(orient="records"), indent=2, ensure_ascii=False
+        )
 
-    prompt = PromptTemplate.from_template(QUESTION_GEN_PROMPT_TEMPLATE)
-    chain = prompt | llm.with_structured_output(ListFormatter)
+    # Use JsonOutputParser bound to ListFormatter schema
+    parser = JsonOutputParser(pydantic_object=ListFormatter)
+
+    prompt = PromptTemplate(
+        template=QUESTION_GEN_PROMPT_TEMPLATE
+        + "\n\nReturn a JSON object containing a 'questions' key:\n{format_instructions}",
+        input_variables=["cols_summary_str"],
+        partial_variables={"format_instructions": parser.get_format_instructions()},
+    )
+
+    chain = prompt | llm | parser
 
     try:
-        result: ListFormatter = chain.invoke(
-            {
-                "shape_str": shape_str,
-                "cols_summary_str": cols_summary_str,
-            }
-        )
-        return result.questions
+        result = chain.invoke({"cols_summary_str": cols_summary_str})
+
+        if isinstance(result, dict):
+            return result.get("questions", [])
+        return getattr(result, "questions", [])
+
     except Exception as e:
-        print(f"LLM Generation Error: {e}")
+        safe_e = str(e).encode("utf-8", errors="backslashreplace").decode("utf-8")
+        print(f"LLM Generation Error: {safe_e}")
         return [
-            "Show summary statistics for numerical columns.",
+            f"LLM Generation Error: {safe_e}.",
             "Plot distributions of key categorical variables.",
             "Check for correlations across the dataset.",
         ]

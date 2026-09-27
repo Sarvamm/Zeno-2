@@ -7,7 +7,7 @@ import streamlit as st
 
 # Setup default configurations before any rendering
 pio.templates.default = "plotly_dark"
-st.set_page_config(page_title="Data Analysis Engine", layout="wide")
+st.set_page_config(page_title="Zeno 2", layout="wide")
 
 # Import Modularized Components
 from components.chat_ui import execute_and_render, render_buttons

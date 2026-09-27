@@ -21,6 +21,9 @@ class StreamlitJupyterKernel:
         self.kc.start_channels()
         self.kc.wait_for_ready(timeout=15)
 
+        # Automatically initialize default imports on kernel startup
+        self._initialize_kernel_env()
+
     def _ensure_env_kernelspec(self) -> str:
         ksm = KernelSpecManager()
         kernel_name = f"streamlit_env_{sys.version_info.major}_{sys.version_info.minor}"
@@ -41,14 +44,30 @@ class StreamlitJupyterKernel:
             )
         return kernel_name
 
+    def _initialize_kernel_env(self):
+        """Pre-loads common libraries right after kernel startup."""
+        startup_code = """
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import plotly.express as px
+import plotly.graph_objects as go
+import plotly.io as pio
+from sinica import ProfileReport
+
+pio.templates.default = "plotly_dark"
+pio.renderers.default = 'notebook_connected'
+"""
+        self.execute_code(startup_code, timeout=60)
+
     def execute_code(self, code: str, timeout: int = 20) -> list[dict]:
         msg_id = self.kc.execute(code)
         outputs = []
         while True:
             try:
                 msg = self.kc.get_iopub_msg(timeout=timeout)
-            except Exception:
-                break
+            except Exception as e:
+                print(e)
             if msg["parent_header"].get("msg_id") != msg_id:
                 continue
 
@@ -74,16 +93,12 @@ class StreamlitJupyterKernel:
         df.to_csv(temp_csv_path, index=False)
 
         init_code = f"""
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import plotly.express as px
-import plotly.graph_objects as go
-import plotly.io as pio
-
-pio.templates.default = "plotly_dark"
-pio.renderers.default = 'notebook_connected'
 {var_name} = pd.read_csv('{clean_path}')
+
+pr = ProfileReport({var_name})
+
+summary_df = pr.summary() # when user asks summary display this
+alerts_df = pr.alerts()   # when user asks about alerts use this
 """
         outputs = self.execute_code(init_code, timeout=30)
         for out in outputs:
@@ -125,7 +140,8 @@ print("MANIFEST_START" + json.dumps(_vars_summary) + "MANIFEST_END")
                     )
                     if match:
                         return json.loads(match.group(1).strip())
-                except Exception:
+                except Exception as e:
+                    print(e)
                     break
         return {}
 
