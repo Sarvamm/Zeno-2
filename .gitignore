@@ -1,3 +1,4 @@
 .streamlit/secrets.toml
 .vscode
 .devcontainer
+.utils/__pycache__
