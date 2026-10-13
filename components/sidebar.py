@@ -26,10 +26,10 @@ def render_sidebar():
         )
         with st.sidebar.expander("Dataset Summary Statistics", expanded=False):
             pr = ProfileReport(df)
-            st.dataframe(pr.summary())
+            st.dataframe(pr.get_summary())
 
         with st.sidebar.expander("Data Alerts", expanded=False):
-            st.dataframe(pr.alerts())
+            st.dataframe(pr.get_alerts())
     else:
         st.sidebar.warning("No active `df` found in kernel.")
 

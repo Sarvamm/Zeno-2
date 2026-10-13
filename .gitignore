@@ -2,3 +2,8 @@
 .vscode
 .devcontainer
 .utils/__pycache__
+./services/__pychache__
+./pages/__pychache__
+./components/__pychache__
+
+

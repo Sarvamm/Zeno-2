@@ -97,8 +97,8 @@ pio.renderers.default = 'notebook_connected'
 
 pr = ProfileReport({var_name})
 
-summary_df = pr.summary() # when user asks summary display this
-alerts_df = pr.alerts()   # when user asks about alerts use this
+summary_df = pr.get_summary() # when user asks summary display this
+alerts_df = pr.get_alerts()   # when user asks about alerts use this
 """
         outputs = self.execute_code(init_code, timeout=30)
         for out in outputs:

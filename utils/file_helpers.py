@@ -34,8 +34,8 @@ df = pd.read_csv('{file_name}')
 
 pr = ProfileReport(df)
 
-summary_df = pr.summary() 
-alerts_df = pr.alerts()   
+summary_df = pr.get_summary() 
+alerts_df = pr.get_alerts()   
 """
     notebook["cells"].append(
         {
