@@ -8,6 +8,13 @@ from services.llm_agent import generate_questions
 from utils.file_helpers import generate_jupyter_notebook
 
 
+def format_summary(df):
+    df = df.to_pandas().transpose()
+    df.columns = df.iloc[0]
+    df = df.iloc[1:]
+    return df
+
+
 def render_sidebar():
     """Renders the entire sidebar interface."""
     kernel = st.session_state["kernel"]
@@ -26,7 +33,7 @@ def render_sidebar():
         )
         with st.sidebar.expander("Dataset Summary Statistics", expanded=False):
             pr = ProfileReport(df)
-            st.dataframe(pr.get_summary())
+            st.dataframe(format_summary(pr.get_summary()))
 
         with st.sidebar.expander("Data Alerts", expanded=False):
             st.dataframe(pr.get_alerts())
